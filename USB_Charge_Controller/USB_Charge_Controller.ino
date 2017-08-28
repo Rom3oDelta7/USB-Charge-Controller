@@ -89,7 +89,7 @@ To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-
 #define FORCE_DISABLE    V5
 #define MANUAL_RUNTIME   V6
 
-// LED status colors
+// LED status colors - Not currently used
 #define BLYNK_RED        "#D3435C"            // off
 #define BLYNK_YELLOW     "#ED9D00"            // manually disabled
 #define BLYNK_GREEN      "#23C48E"            // charging
@@ -112,8 +112,8 @@ BlynkTimer timer;
 #define SCL            5    // (NodeMCU D1)
 #endif
 
-#define ENABLE        D5    // 14
-#define MANUAL        D6    // 12
+#define ENABLE        14    // D5
+#define MANUAL        12    // D6
 
 // software debounce for hardware events
 #define DEBOUNCE_TIME 250
@@ -142,17 +142,17 @@ void statusUpdate (const ChargeState cstate);
  to save the configuration in EEPROM
  */
 struct {
-   int               start = 0;                // scheduled start time (midnight)
-   int               stop = 6 * 3600;          // scheduled stop time (6 AM)
-   int menuSelection = 1;                      // schedule menu presets
-   ChargeState       chargeState;              // current state
-   ChargeState       lastChargeState;          // track previous state to manage Blynk updates
+   int               start = 0;                       // scheduled start time (midnight)
+   int               stop = 6 * 3600;                 // scheduled stop time (6 AM)
+   uint8_t           menuSelection = 1;               // schedule menu preset selection
+   ChargeState       chargeState = S_QUIESCENT;       // current state
+   ChargeState       lastChargeState = S_QUIESCENT;   // track previous state to manage Blynk updates
    volatile bool     manual = false;             
    volatile bool     disable = false;
-   bool              charging = false;         // controls charging MOSFET
-   time_t            runtimeStart;             // when charging started
-   float             chargeProgress = 0.0;     // tracks runtime for progress bars
-   uint32_t          savedRuntime = 0;         // save prior runtime if disabled during a scheduled cycle
+   bool              charging = false;                // controls charging MOSFET
+   time_t            runtimeStart;                    // when charging started
+   float             chargeProgress = 0.0;            // tracks runtime for progress bars
+   uint32_t          savedRuntime = 0;                // save prior runtime if disabled during a scheduled cycle
 } state;
 
 // ============================= Functions ===================================================
@@ -406,8 +406,6 @@ void statusUpdate (const ChargeState cstate) {
  set the start and stop time for a custom schedule
  use the Blynk convention of seconds since midnight
 
- The schedule can be set at any time but it is not put into effect until set on the Schedule menu
-
  start and stop times must be on the same day
 */
 BLYNK_WRITE ( SCHEDULE ) {
@@ -436,6 +434,8 @@ BLYNK_WRITE ( SCHEDULE ) {
       state.start = state.stop;
       state.start = temp;
    }
+   state.menuSelection = 4;
+   Blynk.virtualWrite(MENU, 4);
 }
 
 /*
@@ -473,7 +473,7 @@ BLYNK_WRITE ( MENU ) {
       break;
    }
    // display the currently selected schedule
-   Blynk.virtualWrite(SCHEDULE, state.start, state.stop, "America/Phoenix");
+   Blynk.virtualWrite(SCHEDULE, state.start, state.stop);
 }
 
 /*
@@ -507,6 +507,10 @@ BLYNK_WRITE (FORCE_DISABLE) {
    } else {
       INFO(F("Disable button pressed in Blynk - IGNORED"), "");
    }
+}
+
+BLYNK_CONNECTED () {
+   Blynk.syncAll();
 }
    
 
@@ -559,6 +563,7 @@ void setup(void) {
 
    // OTA
    setupOTA();
+   yield();
 
    display.drawProgressBar(0, 32, 120, 10, 80);
    display.display();
@@ -566,22 +571,12 @@ void setup(void) {
    // restore server state for menus (async)
    Blynk.syncVirtual(SCHEDULE, MENU);
 
-
-#if 0
-   Blynk.virtualWrite(SCHEDULE, state.start, state.stop);
-   if ( state.customScheduleEnabled ) {
-      INFO(F(" custom schedule had been saved"), "");
-      Blynk.virtualWrite(MENU, 4);                                   // custom schedule
-   } else {
-      Blynk.virtualWrite(MENU, 1);                                   // midnight to 6AM default
-   }
-#endif // 0
-
    // clear any lingering previous state that is now stale
    Blynk.virtualWrite(MANUAL_OVERRIDE, false);
    Blynk.virtualWrite(MANUAL_RUNTIME, " ");                     // strangeness ensues when a null string is passed, so send a space
    Blynk.virtualWrite(FORCE_DISABLE, false);
    Blynk.virtualWrite(PROGRESS_BAR, 0);
+   Blynk.run();
 
 
    display.drawProgressBar(0, 32, 120, 10, 100);
