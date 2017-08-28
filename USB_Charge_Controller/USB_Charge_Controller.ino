@@ -75,7 +75,7 @@ To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-
 // ============================= Blynk ==================================================
 
 /*
- Blynk customization is currently not enbaled
+ Blynk customization (setProperty()) is currently not enbaled
  This is becuase the setProperties function for buttons and menus, for example, is taking multiple seconds
  to complete, resulting in Blynk resetting & reconnecting and thus making the UI unresponsive
 */
@@ -83,7 +83,7 @@ To view a copy of this license, visit http://creativecommons.org/licenses/by-nc-
 // dashbord controls
 #define STATUS_LED       V0
 #define MENU             V1
-#define CUSTOM_SCHEDULE  V2
+#define SCHEDULE         V2
 #define PROGRESS_BAR     V3
 #define MANUAL_OVERRIDE  V4
 #define FORCE_DISABLE    V5
@@ -112,11 +112,12 @@ BlynkTimer timer;
 #define SCL            5    // (NodeMCU D1)
 #endif
 
-#define ENABLE        14    // D5
-#define MANUAL        12    // D6
+#define ENABLE        D5    // 14
+#define MANUAL        D6    // 12
 
 // software debounce for hardware events
 #define DEBOUNCE_TIME 250
+
 volatile bool     debounce = true;
 volatile uint32_t	debounceStart = 0;
 
@@ -124,6 +125,7 @@ volatile uint32_t	debounceStart = 0;
 // ============================= OLED Display ===================================================
 
 #define I2C_OLED      0x3C
+
 SH1106Brzo display(I2C_OLED, SDA, SCL);               // 128 x 64 OLED monochrome screen connected via I2C
 
 
@@ -131,83 +133,27 @@ SH1106Brzo display(I2C_OLED, SDA, SCL);               // 128 x 64 OLED monochrom
 
 #define MY_TIMEZONE    UTC_MST              // select your timezone here (from WorldTimezones.h)
 
-volatile bool     manual = false;
-volatile bool     disable = false;
-
-bool              charging = false;         // controls charging MOSFET
-time_t            runtimeStart;             // when charging started
-float             chargeProgress = 0.0;     // tracks runtime for progress bars
-uint32_t          savedRuntime = 0;         // save prior runtime if disabled during a scheduled cycle
-
 typedef enum:uint8_t { S_MANUAL, S_CHARGING, S_DISABLED, S_QUIESCENT } ChargeState;
-ChargeState chargeState = S_QUIESCENT;      // current state
-ChargeState lastChargeState = S_QUIESCENT;  // track previous state to manage Blynk updates
 
-void statusUpdate (const ChargeState state);
-
-// ============================= EEPROM ===================================================
-
-#define EEPROM_SIZE          56
-#define EEPROM_KEY           0x87       // indicates previously stored data
-
-#define EEPROM_KEY_OFFSET    0
+void statusUpdate (const ChargeState cstate);
 
 /*
  this class stores the unit config parameters in memory and provides member functions
  to save the configuration in EEPROM
  */
-class Config {
-public:
-   union {
-      struct {
-         uint8_t    key;                        // EEPROM validity key
-         int        start;                      // scheduled start time
-         int        stop;                       // scheduled stop time
-         bool       customScheduleEnabled;      // if custom schedule enabled - otherwise use a pre-set
-      } config;
-      uint8_t data[sizeof(config)];
-   };
-
-   // class constructor - cannot use member init syntax due to the union above
-   Config (const uint8_t ckey, const int cstart, const int cstop, const bool cenabled) {
-      config.key = ckey;
-      config.start = cstart;
-      config.stop = cstop;
-      config.customScheduleEnabled = cenabled;
-      EEPROM.begin(EEPROM_SIZE);
-   }
-
-   /*
-    Member functions
-
-    save settings in EEPROM
-   */
-   void save (void) {
-      config.key = EEPROM_KEY;
-      for ( int i = EEPROM_KEY_OFFSET; i < sizeof(config) + EEPROM_KEY_OFFSET; i++ ) {
-         EEPROM.write(i, data[i]);
-      }
-      EEPROM.commit();
-   }
-
-
-   /*
-    read saved config data from EEPROM
-    also initializes saved config if not already saved
-   */
-   void get (void) {
-      uint8_t savedKey = EEPROM.read(EEPROM_KEY_OFFSET);
-
-      if ( savedKey == EEPROM_KEY ) {
-         // read existing daved data
-         for ( int i = EEPROM_KEY_OFFSET; i < sizeof(config) + EEPROM_KEY_OFFSET; i++ ) {
-            data[i] = EEPROM.read(i);
-         }
-      }
-   }
-};
-
-Config currentConfig = { 0, 0, (6 * 3600), false };         // midnight & 6AM start/stop defaults
+struct {
+   int               start = 0;                // scheduled start time (midnight)
+   int               stop = 6 * 3600;          // scheduled stop time (6 AM)
+   int menuSelection = 1;                      // schedule menu presets
+   ChargeState       chargeState;              // current state
+   ChargeState       lastChargeState;          // track previous state to manage Blynk updates
+   volatile bool     manual = false;             
+   volatile bool     disable = false;
+   bool              charging = false;         // controls charging MOSFET
+   time_t            runtimeStart;             // when charging started
+   float             chargeProgress = 0.0;     // tracks runtime for progress bars
+   uint32_t          savedRuntime = 0;         // save prior runtime if disabled during a scheduled cycle
+} state;
 
 // ============================= Functions ===================================================
 
@@ -219,7 +165,7 @@ void manualOverride (void) {
       debounce = true;
       debounceStart = millis();
 
-      manual = !manual;
+      state.manual = !state.manual;
    }
 }
 
@@ -294,56 +240,56 @@ void powerManagement (void) {
    static bool counterEnabled = false;         // true when runtimer counter is active
    
    INFO(F(">>>> Power Management"), "");
-   INFO(F("\tmanual"), manual);
-   INFO(F("\tdisable"), disable);
+   INFO(F("\tmanual"), state.manual);
+   INFO(F("\tdisable"), state.disable);
 
    ELAPSED(F("Start of pwrMgt"), 0);
    time_t timeNow = now();    // use a constant time value to avoid corner cases where, for example, the hour changes between function call
    int currentTimeinSecs = ((3600 * hour(timeNow)) + (60 * minute(timeNow)) + second(timeNow));
-   if ( !disable ) {
-      if ( (currentTimeinSecs >= currentConfig.config.start) && (currentTimeinSecs < currentConfig.config.stop) ) {
+   if ( !state.disable ) {
+      if ( (currentTimeinSecs >= state.start) && (currentTimeinSecs < state.stop) ) {
          // in the charging window
          if ( !counterEnabled ) {
             counterEnabled = true;
-            runtimeStart = now();
+            state.runtimeStart = now();
          }
-         INFO(F("\tState: charging"), runtimeStart);
-         chargeState = S_CHARGING;
-         if ( chargeState != lastChargeState ) {
+         INFO(F("\tState: charging"), state.runtimeStart);
+         state.chargeState = S_CHARGING;
+         if ( state.chargeState != state.lastChargeState ) {
             // throttle Blynk traffic if the state has not changed to minize connection resets
-            lastChargeState = chargeState;
+            state.lastChargeState = state.chargeState;
             statusLED.setColor(BLYNK_GREEN);
             statusLED.setLabel("ON");
             Blynk.virtualWrite(MANUAL_OVERRIDE, false);
             Blynk.virtualWrite(MANUAL_RUNTIME, " ");
          }
-         charging = true;
+         state.charging = true;
          // the automatic cycle overrides manual setting unless diable has been set
-         manual = false; 
-      } else if ( manual ) {
+         state.manual = false;
+      } else if ( state.manual ) {
          if ( !counterEnabled ) {
             counterEnabled = true;
-            runtimeStart = now();
+            state.runtimeStart = now();
             Blynk.virtualWrite(PROGRESS_BAR, 0);                 // progress bar inactive here - use runtime field
          }
-         INFO(F("\tState: manual"), runtimeStart);
-         chargeState = S_MANUAL;
-         if ( chargeState != lastChargeState ) {
-            lastChargeState = chargeState;
+         INFO(F("\tState: manual"), state.runtimeStart);
+         state.chargeState = S_MANUAL;
+         if ( state.chargeState != state.lastChargeState ) {
+            state.lastChargeState = state.chargeState;
             statusLED.setColor(BLYNK_BLUE);
             statusLED.setLabel("MAN");
             Blynk.virtualWrite(MANUAL_OVERRIDE, true);
             Blynk.virtualWrite(MANUAL_RUNTIME, " ");             // clear field when manual first set
          }
-         charging = true;
-         savedRuntime = 0;                                       // reset anytime we are NOT in the charging window
+         state.charging = true;
+         state.savedRuntime = 0;                                 // reset anytime we are NOT in the charging window
       } else {
          // outside charging window
          INFO(F("\tState: OFF"), "");
          
-         chargeState = S_QUIESCENT;
-         if ( chargeState != lastChargeState ) {
-            lastChargeState = chargeState;
+         state.chargeState = S_QUIESCENT;
+         if ( state.chargeState != state.lastChargeState ) {
+            state.lastChargeState = state.chargeState;
             ELAPSED(F("About to set LED options"), 0);
             statusLED.setColor(BLYNK_RED);
             statusLED.setLabel("OFF");
@@ -353,21 +299,21 @@ void powerManagement (void) {
          }
          // ONLY reset manual flag in the ISR or BLYNK_WRITE function (or S_CHARGING above)
          counterEnabled = false;
-         charging = false;
-         savedRuntime = 0;
+         state.charging = false;
+         state.savedRuntime = 0;
       }
    } else {
       // forcibly disabled - auto and manual states
       INFO(F("\tState: disabled"), "");
-      if ( chargeState == S_CHARGING ) {
+      if ( state.chargeState == S_CHARGING ) {
          // add the current session runtime to the saved value every time user hits disable when charging is active
-         savedRuntime += (now() - runtimeStart);
-         INFO(F("saved runtime"), savedRuntime);
+         state.savedRuntime += (now() - state.runtimeStart);
+         INFO(F("saved runtime"), state.savedRuntime);
       }
-      chargeState = S_DISABLED;
-      if ( chargeState != lastChargeState ) {
+      state.chargeState = S_DISABLED;
+      if ( state.chargeState != state.lastChargeState ) {
          // Blynk dashboard state changed in BLYNK_WRITE for this button, unlike S_MANUAL
-         lastChargeState = chargeState;
+         state.lastChargeState = state.chargeState;
          statusLED.setColor(BLYNK_YELLOW);
          statusLED.setLabel("DSBLD");
          Blynk.virtualWrite(MANUAL_OVERRIDE, false);
@@ -375,24 +321,24 @@ void powerManagement (void) {
       }
 
       counterEnabled = false;
-      charging = false;
-      manual = false;
+      state.charging = false;
+      state.manual = false;
    }
 
    yield();
 
    ELAPSED(F("At charging check"), 0);
-   if ( charging ) {
+   if ( state.charging ) {
       // update progress here and refer to this in statusUpdate also
-      if ( chargeState == S_CHARGING ) {
+      if ( state.chargeState == S_CHARGING ) {
          // note the progress bar is not cleared after scheduled charging stops to provide a visual record of recent status
-         int scheduledSeconds = currentConfig.config.stop - currentConfig.config.start;
-         chargeProgress = (static_cast<float>(now() - runtimeStart + savedRuntime) / static_cast<float>(scheduledSeconds)) * 100.0;
-         INFO(F("Charge progress bar"), static_cast<int>(chargeProgress));
-         Blynk.virtualWrite(PROGRESS_BAR, static_cast<int>(chargeProgress));
-      } else if ( chargeState == S_MANUAL ) {
+         int scheduledSeconds =state.stop - state.start;
+         state.chargeProgress = (static_cast<float>(now() - state.runtimeStart + state.savedRuntime) / static_cast<float>(scheduledSeconds)) * 100.0;
+         INFO(F("Charge progress bar"), static_cast<int>(state.chargeProgress));
+         Blynk.virtualWrite(PROGRESS_BAR, static_cast<int>(state.chargeProgress));
+      } else if ( state.chargeState == S_MANUAL ) {
          char buf[64];
-         int runtime = now() - runtimeStart;
+         int runtime = now() - state.runtimeStart;
          sprintf(buf, "Elapsed %02d:%02d:%02d", (runtime / 3600), ((runtime % 3600) / 60), (runtime % 60));
          Blynk.virtualWrite(MANUAL_RUNTIME, buf);
       }
@@ -406,7 +352,7 @@ void powerManagement (void) {
 /*
  display the status OLED screen for the given unit state
 */
-void statusUpdate (const ChargeState state) {
+void statusUpdate (const ChargeState cstate) {
    display.clear();
    // common elements
    time_t timeNow = now();
@@ -416,26 +362,26 @@ void statusUpdate (const ChargeState state) {
    display.drawString(0, 12, String(buf));
 
    // time formats are MM:SS
-   sprintf(buf, "Start %02d:%02d    Stop %02d:%02d", (currentConfig.config.start / 3600), ((currentConfig.config.start % 3600) / 60),
-      (currentConfig.config.stop / 3600), ((currentConfig.config.stop % 3600) / 60));
+   sprintf(buf, "Start %02d:%02d    Stop %02d:%02d", (state.start / 3600), ((state.start % 3600) / 60),
+      (state.stop / 3600), ((state.stop % 3600) / 60));
    display.drawString(0, 24, String(buf));
 
-   int scheduledSeconds = currentConfig.config.stop - currentConfig.config.start;
+   int scheduledSeconds = state.stop - state.start;
    sprintf(buf, "Runtime %02d:%02d   Blynk %s", (scheduledSeconds / 3600), ((scheduledSeconds % 3600) / 60), Blynk.connected() ? "OK" : "ERR");
    display.drawString(0, 48, String(buf));
 
    // state-specific
-   int runtime = static_cast<int>(now() - runtimeStart);
+   int runtime = static_cast<int>(now() - state.runtimeStart);
    sprintf(buf, "Elapsed %02d:%02d:%02d", (runtime / 3600), ((runtime % 3600) / 60), (runtime % 60));
 
-   switch ( state ) {
+   switch ( cstate ) {
    case S_QUIESCENT:
       display.drawString(0, 0, String("Quiescent"));
       break;
 
    case S_CHARGING:
       display.drawString(0, 0, String("Charging"));
-      display.drawProgressBar(0, 36, 120, 10, static_cast<int>(chargeProgress));
+      display.drawProgressBar(0, 36, 120, 10, static_cast<int>(state.chargeProgress));
       break;
 
    case S_MANUAL:
@@ -464,7 +410,7 @@ void statusUpdate (const ChargeState state) {
 
  start and stop times must be on the same day
 */
-BLYNK_WRITE ( CUSTOM_SCHEDULE ) {
+BLYNK_WRITE ( SCHEDULE ) {
    TimeInputParam schedule(param);
    int            value;
 
@@ -472,30 +418,24 @@ BLYNK_WRITE ( CUSTOM_SCHEDULE ) {
 
    if ( schedule.hasStartTime() ) {
       value = param[0].asInt();
-      if ( value == -1 ) {
-         // no user data entered, use midnight
-         currentConfig.config.start = 0;
-      } else {
-         currentConfig.config.start = value;
+      INFO(F("  start raw"), value);
+      if ( value != -1 ) {
+         state.start = value;
       }
    }
    if ( schedule.hasStopTime() ) {
       value = param[1].asInt();
-      if ( value == -1 ) {
-         currentConfig.config.stop = (6 * 3600);            // use 6AM default
-      } else {
-         currentConfig.config.stop = value;
+      INFO(F("  stop raw"), value);
+      if ( value != -1 ) {
+         state.stop = value;
       }
    }
    // if stop is later then start, then switch them
-   if ( currentConfig.config.stop < currentConfig.config.start ) {
-      int temp = currentConfig.config.start;
-      currentConfig.config.start = currentConfig.config.stop;
-      currentConfig.config.start = temp;
+   if ( state.stop < state.start ) {
+      int temp = state.start;
+      state.start = state.stop;
+      state.start = temp;
    }
-   INFO(F("\tSaving config"), "");
-   currentConfig.save();
-
 }
 
 /*
@@ -504,41 +444,36 @@ BLYNK_WRITE ( CUSTOM_SCHEDULE ) {
  */
 BLYNK_WRITE ( MENU ) {
    INFO(F("Menu selection"), param.asInt());
-   switch ( param.asInt() ) {
+   state.menuSelection = param.asInt();
+   switch ( state.menuSelection ) {
    case 1:
       // 6 hours
-      currentConfig.config.start = 0;
-      currentConfig.config.stop = (6 * 3600);   // 6 AM
-      currentConfig.config.customScheduleEnabled = false;
+      state.start = 0;
+      state.stop = (6 * 3600);   // 6 AM
+
       break;
 
    case 2:
       // 8 hours
-      currentConfig.config.start = 0;
-      currentConfig.config.stop = (8 * 3600);   // 8 AM
-      currentConfig.config.customScheduleEnabled = false;
+      state.start = 0;
+      state.stop = (8 * 3600);   // 8 AM
       break;
 
    case 3:
       // 10 hours
-      currentConfig.config.start = 0;
-      currentConfig.config.stop = (10 * 3600);   // 10 AM
-      currentConfig.config.customScheduleEnabled = false;
+      state.start = 0;
+      state.stop = (10 * 3600);   // 10 AM
       break;
 
    case 4:
       // custom schedule
-      currentConfig.config.customScheduleEnabled = true;
       break;
 
    default:
       break;
    }
-
-   // update schedule input fields to indicate selection
-   Blynk.virtualWrite(CUSTOM_SCHEDULE, currentConfig.config.start, currentConfig.config.stop);               // TODO - not working ZZZZ
-
-   currentConfig.save();
+   // display the currently selected schedule
+   Blynk.virtualWrite(SCHEDULE, state.start, state.stop, "America/Phoenix");
 }
 
 /*
@@ -550,7 +485,7 @@ BLYNK_WRITE ( MANUAL_OVERRIDE ) {
    static int lastPress = 0;
    if ( (millis() - lastPress) > BLYNK_DEBOUNCE_TIME ) {
       lastPress = millis();
-      manual = !manual;
+      state.manual = !state.manual;
       INFO(F("Manual button pressed in Blynk"), "");
    } else {
       INFO(F("Manual button pressed in Blynk - IGNORED"), "");
@@ -564,9 +499,9 @@ BLYNK_WRITE ( MANUAL_OVERRIDE ) {
 BLYNK_WRITE (FORCE_DISABLE) {
    static int lastPress = 0;
    if ( (millis() - lastPress) > BLYNK_DEBOUNCE_TIME ) {
-      disable = !disable;
+      state.disable = !state.disable;
       // we can reset Blynk dashbaord here since there is no physical button as with the manual override
-      Blynk.virtualWrite(FORCE_DISABLE, disable);
+      Blynk.virtualWrite(FORCE_DISABLE, state.disable);
       lastPress = millis();
       INFO(F("Disable button pressed in Blynk"), "");
    } else {
@@ -628,18 +563,13 @@ void setup(void) {
    display.drawProgressBar(0, 32, 120, 10, 80);
    display.display();
 
-   // restore saved settings
-   currentConfig.get();
-   INFO(F("Setup: Start time"), currentConfig.config.start);
-   INFO(F("Setup: Stop time"), currentConfig.config.stop);
+   // restore server state for menus (async)
+   Blynk.syncVirtual(SCHEDULE, MENU);
 
-   // restore server state for menus this way until we can get the virtualWrite to work here ZZZ TODO
-   Blynk.syncVirtual(CUSTOM_SCHEDULE);
-   Blynk.syncVirtual(MENU);
 
 #if 0
-   Blynk.virtualWrite(CUSTOM_SCHEDULE, currentConfig.config.start, currentConfig.config.stop);
-   if ( currentConfig.config.customScheduleEnabled ) {
+   Blynk.virtualWrite(SCHEDULE, state.start, state.stop);
+   if ( state.customScheduleEnabled ) {
       INFO(F(" custom schedule had been saved"), "");
       Blynk.virtualWrite(MENU, 4);                                   // custom schedule
    } else {
@@ -676,14 +606,14 @@ void loop(void) {
    ELAPSED(F("After Blynk.run"), 200);
 
    // toggle the USB power MOSFET
-   if ( charging ) {
+   if ( state.charging ) {
       digitalWrite(ENABLE, HIGH);
    } else {
       digitalWrite(ENABLE, LOW);
    }
 
    // power_management called by timer; also udpates Blynk dashboard
-   statusUpdate(chargeState);
+   statusUpdate(state.chargeState);
    ELAPSED(F("After statusUpdate"), 100);
    
    ArduinoOTA.handle();
